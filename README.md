@@ -15,6 +15,7 @@ You Lock is an Android app that protects selected apps with a PIN, a drawn patte
 
 - Android Studio with Android SDK 35
 - Android device or emulator running Android 8.0 (API 26) or later
+- Java 17 or newer for Gradle builds
 
 ## Run
 
@@ -35,3 +36,5 @@ The monitor uses Usage Access to identify foreground apps, Display over other ap
 ## Build
 
 On Windows, run `gradlew.bat :app:assembleDebug`. On macOS or Linux, run `./gradlew :app:assembleDebug`.
+
+Release builds use a local signing key configured in `.signing/signing.properties`. Keep this file and its referenced keystore private. If the signing file is absent, Gradle creates an unsigned release APK.
