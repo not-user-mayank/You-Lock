@@ -24,6 +24,10 @@ To protect apps, grant Usage Access and Display over other apps, then start **Ba
 
 Fingerprint unlock uses Android's strong biometric prompt and requires a supported, enrolled biometric. A PIN fallback remains available. Pattern unlock requires drawing the same pattern twice during setup.
 
+## Download
+
+Download the latest signed APK from [GitHub Releases](https://github.com/not-user-mayank/You-Lock/releases/latest).
+
 ## Permissions
 
 The monitor uses Usage Access to identify foreground apps, Display over other apps to show the lock screen, and a foreground service notification while monitoring. These permissions are enabled by the user in Android settings or in response to Android prompts.
