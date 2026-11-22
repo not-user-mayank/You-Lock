@@ -2,12 +2,15 @@ package com.example.applock
 
 import android.Manifest
 import android.app.AppOpsManager
+import android.app.ActivityManager
+import android.app.admin.DevicePolicyManager
 import android.app.usage.UsageEvents
 import android.app.usage.UsageStatsManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Canvas as AndroidCanvas
 import android.graphics.Rect
 import android.graphics.drawable.Drawable
@@ -48,11 +51,11 @@ import androidx.compose.material.icons.rounded.AccessTime
 import androidx.compose.material.icons.rounded.Apps
 import androidx.compose.material.icons.rounded.BatteryFull
 import androidx.compose.material.icons.rounded.Fingerprint
-import androidx.compose.material.icons.rounded.Fingerprint
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Security
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -98,6 +101,16 @@ internal const val MONITOR_ENABLED_KEY = "monitor_enabled"
 internal const val UNLOCK_MODE_KEY = "unlock_mode"
 internal const val PATTERN_HASH_KEY = "pattern_hash"
 internal const val PATTERN_SALT_KEY = "pattern_salt"
+internal const val SELF_LOCK_KEY = "self_lock_enabled"
+internal const val ALWAYS_MONITOR_KEY = "always_monitor"
+internal const val UNINSTALL_PROTECTION_KEY = "uninstall_protection"
+internal const val FAILED_ATTEMPT_THRESHOLD_KEY = "failed_attempt_threshold"
+internal const val CAMERA_CAPTURE_ENABLED_KEY = "camera_capture_enabled"
+internal const val FAILED_ATTEMPTS_KEY = "failed_attempts"
+internal const val CAPTURED_FOR_SESSION_KEY = "captured_for_session"
+internal const val RECOVERY_QUESTION_KEY = "recovery_question"
+internal const val RECOVERY_HASH_KEY = "recovery_hash"
+internal const val RECOVERY_SALT_KEY = "recovery_salt"
 
 internal enum class UnlockMode(val label: String) {
     PIN("PIN"),
@@ -144,13 +157,17 @@ private fun AppLockHome() {
         context.getSharedPreferences(SETTINGS_FILE, Context.MODE_PRIVATE)
     }
     var pin by remember { mutableStateOf("") }
-    var unlocked by remember { mutableStateOf(false) }
+    var unlocked by remember(preferences) {
+        mutableStateOf(!preferences.getBoolean(SELF_LOCK_KEY, true))
+    }
     var message by remember { mutableStateOf("") }
     var pinConfigured by remember(preferences) { mutableStateOf(hasSavedPin(preferences)) }
     var unlockMode by remember(preferences) {
         mutableStateOf(UnlockMode.fromStoredValue(preferences.getString(UNLOCK_MODE_KEY, null)))
     }
     var usePinFallback by remember { mutableStateOf(false) }
+    var showRecoveryDialog by remember { mutableStateOf(false) }
+    var showRecoverySetup by remember { mutableStateOf(false) }
     var lockedPackages by remember(preferences) {
         mutableStateOf(readLockedPackages(preferences))
     }
@@ -160,11 +177,16 @@ private fun AppLockHome() {
             savePin(preferences, newPin)
             pinConfigured = true
             unlocked = true
+            if (preferences.getString(RECOVERY_QUESTION_KEY, null).isNullOrBlank()) {
+                showRecoverySetup = true
+            }
         }
     } else if (unlocked) {
         InstalledAppsScreen(
             lockedPackages = lockedPackages,
             unlockMode = unlockMode,
+            preferences = preferences,
+            onRecoverySetup = { showRecoverySetup = true },
             onLockChange = { packageName, shouldLock ->
                 val updatedPackages = if (shouldLock) {
                     lockedPackages + packageName
@@ -192,8 +214,10 @@ private fun AppLockHome() {
                 PatternEntryScreen(
                     onPatternEntered = { pattern ->
                         if (secretMatches(preferences, PATTERN_HASH_KEY, PATTERN_SALT_KEY, pattern)) {
+                            FailedAttemptPhotos.resetSession(context)
                             onUnlockSuccess()
                         } else {
+                            FailedAttemptPhotos.registerWrongPin(context)
                             message = "That pattern doesn’t match. Try again."
                         }
                     },
@@ -211,6 +235,7 @@ private fun AppLockHome() {
                 PinEntryScreen(
                     pin = pin,
                     message = message,
+                    onForgotPin = { showRecoveryDialog = true },
                     onPinChange = { value ->
                         if (value.length <= 4 && value.all(Char::isDigit)) {
                             pin = value
@@ -219,8 +244,10 @@ private fun AppLockHome() {
                     },
                     onUnlock = {
                         if (pinMatches(preferences, pin)) {
+                            FailedAttemptPhotos.resetSession(context)
                             onUnlockSuccess()
                         } else {
+                            if (pin.length == 4) FailedAttemptPhotos.registerWrongPin(context)
                             message = if (pin.length < 4) {
                                 "Enter all 4 digits to continue."
                             } else {
@@ -231,6 +258,28 @@ private fun AppLockHome() {
                 )
             }
         }
+    }
+
+    if (showRecoveryDialog) {
+        RecoveryResetDialog(
+            preferences = preferences,
+            onDismiss = { showRecoveryDialog = false },
+            onPinReset = { newPin ->
+                savePin(preferences, newPin)
+                preferences.edit().putString(UNLOCK_MODE_KEY, UnlockMode.PIN.name).apply()
+                unlockMode = UnlockMode.PIN
+                pin = ""
+                showRecoveryDialog = false
+                unlocked = true
+            }
+        )
+    }
+    if (showRecoverySetup) {
+        RecoverySetupDialog(
+            preferences = preferences,
+            onDismiss = { showRecoverySetup = false },
+            onSaved = { showRecoverySetup = false }
+        )
     }
 }
 
@@ -447,6 +496,7 @@ private fun PinSetupScreen(onPinCreated: (String) -> Unit) {
 private fun PinEntryScreen(
     pin: String,
     message: String,
+    onForgotPin: () -> Unit,
     onPinChange: (String) -> Unit,
     onUnlock: () -> Unit
 ) {
@@ -520,6 +570,9 @@ private fun PinEntryScreen(
         ) {
             Text("Unlock", fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
         }
+        TextButton(onClick = onForgotPin) {
+            Text("Forgot password?", color = Green)
+        }
         Spacer(Modifier.weight(1f))
         Footer()
     }
@@ -529,6 +582,8 @@ private fun PinEntryScreen(
 private fun InstalledAppsScreen(
     lockedPackages: Set<String>,
     unlockMode: UnlockMode,
+    preferences: android.content.SharedPreferences,
+    onRecoverySetup: () -> Unit,
     onLockChange: (String, Boolean) -> Unit,
     onUnlockModeChange: (UnlockMode) -> Unit
 ) {
@@ -538,15 +593,13 @@ private fun InstalledAppsScreen(
     var usageAccessGranted by remember { mutableStateOf(hasUsageAccess(context)) }
     var overlayAccessGranted by remember { mutableStateOf(Settings.canDrawOverlays(context)) }
     var monitorRunning by remember { mutableStateOf(ForegroundMonitorService.isRunning) }
+    var cameraServicePromoted by remember { mutableStateOf(false) }
     var batteryOptimizationIgnored by remember {
         mutableStateOf(isIgnoringBatteryOptimizations(context))
     }
     var lastDetectedApp by remember { mutableStateOf<DetectedApp?>(null) }
     var showPatternSetup by remember { mutableStateOf(false) }
     var unlockModeMessage by remember { mutableStateOf("") }
-    val preferences = remember(context) {
-        context.getSharedPreferences(SETTINGS_FILE, Context.MODE_PRIVATE)
-    }
     val fingerprintAvailable = remember(context) {
         BiometricManager.from(context).canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_STRONG) ==
             BiometricManager.BIOMETRIC_SUCCESS
@@ -563,6 +616,7 @@ private fun InstalledAppsScreen(
             usageAccessGranted = accessGranted
             overlayAccessGranted = Settings.canDrawOverlays(context)
             monitorRunning = ForegroundMonitorService.isRunning
+            if (!monitorRunning) cameraServicePromoted = false
             batteryOptimizationIgnored = isIgnoringBatteryOptimizations(context)
             if (accessGranted) {
                 val detectedApp = withContext(Dispatchers.IO) {
@@ -578,6 +632,19 @@ private fun InstalledAppsScreen(
         contract = ActivityResultContracts.RequestPermission(),
         onResult = { startForegroundMonitor(context) }
     )
+
+    LaunchedEffect(monitorRunning, preferences) {
+        val cameraEnabled = preferences.getBoolean(CAMERA_CAPTURE_ENABLED_KEY, false)
+        val cameraAllowed = ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
+            PackageManager.PERMISSION_GRANTED
+        if (monitorRunning && cameraEnabled && cameraAllowed && !cameraServicePromoted) {
+            cameraServicePromoted = true
+            ContextCompat.startForegroundService(
+                context,
+                Intent(context, ForegroundMonitorService::class.java).setAction(ACTION_ENABLE_CAMERA_CAPTURE)
+            )
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -706,6 +773,11 @@ private fun InstalledAppsScreen(
                 )
             }
         )
+        Spacer(Modifier.height(10.dp))
+        SecurityOptionsCard(
+            preferences = preferences,
+            onRecoverySetup = onRecoverySetup
+        )
         Spacer(Modifier.height(20.dp))
         Text(
             if (isLoading) "Finding apps…" else "${apps.size} APPS  ·  ${lockedPackages.size} SELECTED",
@@ -756,6 +828,304 @@ private fun InstalledAppsScreen(
             }
         )
     }
+}
+
+@Composable
+private fun SecurityOptionsCard(
+    preferences: android.content.SharedPreferences,
+    onRecoverySetup: () -> Unit
+) {
+    val context = LocalContext.current
+    val devicePolicyManager = remember(context) {
+        context.getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
+    }
+    val adminComponent = remember(context) {
+        android.content.ComponentName(context, UninstallAdminReceiver::class.java)
+    }
+    var uninstallProtection by remember(preferences) {
+        mutableStateOf(devicePolicyManager.isAdminActive(adminComponent))
+    }
+    val adminRequest = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) {
+        val active = devicePolicyManager.isAdminActive(adminComponent)
+        preferences.edit().putBoolean(UNINSTALL_PROTECTION_KEY, active).apply()
+        uninstallProtection = active
+    }
+    var selfLock by remember(preferences) {
+        mutableStateOf(preferences.getBoolean(SELF_LOCK_KEY, true))
+    }
+    var continuous by remember(preferences) {
+        mutableStateOf(preferences.getBoolean(ALWAYS_MONITOR_KEY, false))
+    }
+    var cameraEnabled by remember(preferences) {
+        mutableStateOf(preferences.getBoolean(CAMERA_CAPTURE_ENABLED_KEY, false))
+    }
+    var failedAttemptThreshold by remember(preferences) {
+        mutableStateOf(preferences.getInt(FAILED_ATTEMPT_THRESHOLD_KEY, 2))
+    }
+    var showPhotos by remember { mutableStateOf(false) }
+    val cameraPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        cameraEnabled = granted
+        preferences.edit().putBoolean(CAMERA_CAPTURE_ENABLED_KEY, granted).apply()
+        if (granted) FailedAttemptPhotos.resetSession(context)
+        if (granted && ForegroundMonitorService.isRunning) {
+            ContextCompat.startForegroundService(
+                context,
+                Intent(context, ForegroundMonitorService::class.java).setAction(ACTION_ENABLE_CAMERA_CAPTURE)
+            )
+        }
+    }
+    LaunchedEffect(devicePolicyManager, adminComponent) {
+        while (true) {
+            uninstallProtection = devicePolicyManager.isAdminActive(adminComponent)
+            delay(1_000)
+        }
+    }
+
+    Surface(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp), color = Color.White) {
+        Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp)) {
+            Text("SECURITY OPTIONS", color = Green, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.1.sp)
+            SettingsSwitchRow("Lock Still when reopened", selfLock) {
+                selfLock = it
+                preferences.edit().putBoolean(SELF_LOCK_KEY, it).apply()
+            }
+            SettingsSwitchRow("Restart monitoring after reboot", continuous) {
+                continuous = it
+                preferences.edit().putBoolean(ALWAYS_MONITOR_KEY, it).apply()
+            }
+            SettingsSwitchRow("Photo after wrong password attempts", cameraEnabled) { enabled ->
+                if (!enabled) {
+                    cameraEnabled = false
+                    preferences.edit().putBoolean(CAMERA_CAPTURE_ENABLED_KEY, false).apply()
+                    FailedAttemptPhotos.resetSession(context)
+                    if (ForegroundMonitorService.isRunning) {
+                        ContextCompat.startForegroundService(
+                            context,
+                            Intent(context, ForegroundMonitorService::class.java)
+                                .setAction(ACTION_DISABLE_CAMERA_CAPTURE)
+                        )
+                    }
+                } else if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
+                    PackageManager.PERMISSION_GRANTED
+                ) {
+                    cameraEnabled = true
+                    preferences.edit().putBoolean(CAMERA_CAPTURE_ENABLED_KEY, true).apply()
+                    FailedAttemptPhotos.resetSession(context)
+                    if (ForegroundMonitorService.isRunning) {
+                        ContextCompat.startForegroundService(
+                            context,
+                            Intent(context, ForegroundMonitorService::class.java)
+                                .setAction(ACTION_ENABLE_CAMERA_CAPTURE)
+                        )
+                    }
+                } else {
+                    cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+                }
+            }
+            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text("Capture after", modifier = Modifier.weight(1f), color = Ink, fontSize = 13.sp)
+                listOf(2, 4, 6).forEach { count ->
+                    Button(
+                        onClick = {
+                            failedAttemptThreshold = count
+                            preferences.edit().putInt(FAILED_ATTEMPT_THRESHOLD_KEY, count).apply()
+                        },
+                        modifier = Modifier.padding(start = 4.dp),
+                        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (failedAttemptThreshold == count) Green else Color(0xFFEAF1EC),
+                            contentColor = if (failedAttemptThreshold == count) Color.White else Ink
+                        )
+                    ) { Text("$count", fontSize = 12.sp) }
+                }
+            }
+            Text(
+                "Android asks for camera permission and shows its camera indicator. An ongoing notification appears while camera protection runs. Photos stay private until you save them.",
+                color = Muted,
+                fontSize = 10.sp,
+                modifier = Modifier.padding(bottom = 4.dp)
+            )
+            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                val photoCount = FailedAttemptPhotos.list(context).size
+                Text("Private photos ($photoCount)", modifier = Modifier.weight(1f), color = Ink, fontSize = 13.sp)
+                TextButton(onClick = { showPhotos = true }) { Text("View", color = Green) }
+            }
+            SettingsSwitchRow("Uninstall protection", uninstallProtection) {
+                if (it) {
+                    adminRequest.launch(Intent(DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN).apply {
+                        putExtra(DevicePolicyManager.EXTRA_DEVICE_ADMIN, adminComponent)
+                        putExtra(DevicePolicyManager.EXTRA_ADD_EXPLANATION,
+                            "Still must be deactivated in Android settings before it can be uninstalled.")
+                    })
+                } else {
+                    context.startActivity(Intent("android.settings.DEVICE_ADMIN_SETTINGS"))
+                }
+            }
+            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text("Recovery question", modifier = Modifier.weight(1f), color = Ink, fontSize = 13.sp)
+                TextButton(onClick = onRecoverySetup) { Text("Set up", color = Green) }
+            }
+        }
+        Text(
+            "Android requires you to deactivate this device administrator before uninstalling Still. It cannot block factory reset or a user who disables protection.",
+            color = Muted,
+            fontSize = 10.sp,
+            modifier = Modifier.padding(bottom = 6.dp)
+        )
+    }
+    if (showPhotos) {
+        CapturedPhotosDialog(
+            context = context,
+            onDismiss = { showPhotos = false }
+        )
+    }
+}
+
+@Composable
+private fun CapturedPhotosDialog(context: Context, onDismiss: () -> Unit) {
+    var photos by remember { mutableStateOf(FailedAttemptPhotos.list(context)) }
+    var message by remember { mutableStateOf("") }
+    var pendingSave by remember { mutableStateOf<java.io.File?>(null) }
+    val legacyStoragePermission = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        val file = pendingSave
+        if (granted && file != null && FailedAttemptPhotos.saveToGallery(context, file) != null) {
+            message = "Saved to Pictures/You Lock."
+        } else if (!granted) {
+            message = "Storage permission is needed to save this photo."
+        } else {
+            message = "Could not save this photo."
+        }
+        pendingSave = null
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Private failed-attempt photos") },
+        text = {
+            Column {
+                if (photos.isEmpty()) Text("No photos have been captured.", color = Muted)
+                else androidx.compose.foundation.lazy.LazyColumn(
+                    modifier = Modifier.height(360.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    items(photos, key = { it.name }) { file ->
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            val bitmap = remember(file.absolutePath) {
+                                BitmapFactory.decodeFile(file.absolutePath)?.asImageBitmap()
+                            }
+                            if (bitmap != null) Image(
+                                bitmap = bitmap,
+                                contentDescription = "Captured photo",
+                                modifier = Modifier.size(88.dp),
+                                contentScale = ContentScale.Crop
+                            )
+                            Column(modifier = Modifier.weight(1f).padding(start = 8.dp)) {
+                                Text(java.text.DateFormat.getDateTimeInstance().format(java.util.Date(file.lastModified())), fontSize = 11.sp, color = Muted)
+                                TextButton(onClick = {
+                                    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q &&
+                                        ContextCompat.checkSelfPermission(context, Manifest.permission.WRITE_EXTERNAL_STORAGE) !=
+                                        PackageManager.PERMISSION_GRANTED
+                                    ) {
+                                        pendingSave = file
+                                        legacyStoragePermission.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                                    } else if (FailedAttemptPhotos.saveToGallery(context, file) != null) {
+                                        message = "Saved to Pictures/You Lock."
+                                    } else message = "Could not save this photo."
+                                }) { Text("Save", color = Green) }
+                                TextButton(onClick = {
+                                    file.delete()
+                                    photos = FailedAttemptPhotos.list(context)
+                                }) { Text("Delete", color = Color(0xFFB0443E)) }
+                            }
+                        }
+                    }
+                }
+                if (message.isNotEmpty()) Text(message, color = Muted, fontSize = 12.sp)
+                Text("Photos stay inside You Lock unless you choose Save. Camera access is used only after repeated failed unlock attempts while protection is enabled.", color = Muted, fontSize = 11.sp)
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Done", color = Green) } }
+    )
+}
+
+@Composable
+private fun SettingsSwitchRow(label: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Text(label, modifier = Modifier.weight(1f), color = Ink, fontSize = 13.sp)
+        Switch(checked = checked, onCheckedChange = onChange)
+    }
+}
+
+@Composable
+private fun RecoverySetupDialog(
+    preferences: android.content.SharedPreferences,
+    onDismiss: () -> Unit,
+    onSaved: () -> Unit
+) {
+    var question by remember { mutableStateOf(preferences.getString(RECOVERY_QUESTION_KEY, "").orEmpty()) }
+    var answer by remember { mutableStateOf("") }
+    var message by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Set recovery question") },
+        text = {
+            Column {
+                OutlinedTextField(question, { question = it }, label = { Text("Your question") }, singleLine = true)
+                OutlinedTextField(answer, { answer = it }, label = { Text("Answer") }, singleLine = true)
+                if (message.isNotEmpty()) Text(message, color = Color(0xFFB0443E), fontSize = 12.sp)
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                if (question.isBlank() || answer.isBlank()) message = "Enter both a question and answer."
+                else {
+                    preferences.edit().putString(RECOVERY_QUESTION_KEY, question.trim()).apply()
+                    saveSecret(preferences, RECOVERY_HASH_KEY, RECOVERY_SALT_KEY, answer.trim().lowercase())
+                    onSaved()
+                }
+            }) { Text("Save", color = Green) }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Later") } }
+    )
+}
+
+@Composable
+private fun RecoveryResetDialog(
+    preferences: android.content.SharedPreferences,
+    onDismiss: () -> Unit,
+    onPinReset: (String) -> Unit
+) {
+    var answer by remember { mutableStateOf("") }
+    var newPin by remember { mutableStateOf("") }
+    var message by remember { mutableStateOf("") }
+    val question = preferences.getString(RECOVERY_QUESTION_KEY, null)
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Recover your PIN") },
+        text = {
+            Column {
+                Text(question ?: "No recovery question is set on this device.", color = Muted)
+                OutlinedTextField(answer, { answer = it }, label = { Text("Answer") }, singleLine = true)
+                OutlinedTextField(newPin, { value -> if (value.length <= 4 && value.all(Char::isDigit)) newPin = value }, label = { Text("New 4-digit PIN") }, singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword), visualTransformation = PasswordVisualTransformation())
+                if (message.isNotEmpty()) Text(message, color = Color(0xFFB0443E), fontSize = 12.sp)
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                when {
+                    question == null -> message = "Set up a recovery question from the app settings first."
+                    !secretMatches(preferences, RECOVERY_HASH_KEY, RECOVERY_SALT_KEY, answer.trim().lowercase()) -> message = "That answer doesn’t match."
+                    newPin.length != 4 -> message = "Enter a new 4-digit PIN."
+                    else -> onPinReset(newPin)
+                }
+            }) { Text("Reset PIN", color = Green) }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
+    )
 }
 
 @Composable
@@ -864,6 +1234,7 @@ private fun UsageAccessCard(
             }
         }
     }
+
 }
 
 @Composable
@@ -1219,9 +1590,14 @@ private fun hashSecret(secret: String, salt: ByteArray): String {
 }
 
 private fun startForegroundMonitor(context: Context) {
-    context.getSharedPreferences(SETTINGS_FILE, Context.MODE_PRIVATE)
-        .edit()
+    val preferences = context.getSharedPreferences(SETTINGS_FILE, Context.MODE_PRIVATE)
+    preferences.edit()
         .putBoolean(MONITOR_ENABLED_KEY, true)
         .apply()
-    context.startForegroundService(Intent(context, ForegroundMonitorService::class.java))
+    val cameraEnabled = preferences.getBoolean(CAMERA_CAPTURE_ENABLED_KEY, false) &&
+        ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
+        PackageManager.PERMISSION_GRANTED
+    val serviceIntent = Intent(context, ForegroundMonitorService::class.java)
+    if (cameraEnabled) serviceIntent.action = ACTION_ENABLE_CAMERA_CAPTURE
+    context.startForegroundService(serviceIntent)
 }

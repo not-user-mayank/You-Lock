@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">You Lock</string>
+    <string name="device_admin_description">Requires deactivating You Lock in Android settings before uninstalling it.</string>
+</resources>

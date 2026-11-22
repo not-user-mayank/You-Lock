@@ -42,6 +42,9 @@ import kotlinx.coroutines.withContext
 internal const val ACTION_BIOMETRIC_BEGIN = "com.example.applock.BIOMETRIC_BEGIN"
 internal const val ACTION_BIOMETRIC_SUCCEEDED = "com.example.applock.BIOMETRIC_SUCCEEDED"
 internal const val ACTION_BIOMETRIC_CANCELLED = "com.example.applock.BIOMETRIC_CANCELLED"
+internal const val ACTION_ENABLE_CAMERA_CAPTURE = "com.example.applock.ENABLE_CAMERA_CAPTURE"
+internal const val ACTION_DISABLE_CAMERA_CAPTURE = "com.example.applock.DISABLE_CAMERA_CAPTURE"
+internal const val ACTION_CAPTURE_FAILED_ATTEMPT = "com.example.applock.CAPTURE_FAILED_ATTEMPT"
 internal const val EXTRA_LOCKED_PACKAGE = "locked_package"
 
 class ForegroundMonitorService : Service() {
@@ -74,6 +77,23 @@ class ForegroundMonitorService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
+            ACTION_ENABLE_CAMERA_CAPTURE -> {
+                startAsForegroundService(cameraCapture = true)
+            }
+            ACTION_DISABLE_CAMERA_CAPTURE -> {
+                startAsForegroundService(cameraCapture = false)
+                return START_STICKY
+            }
+            ACTION_CAPTURE_FAILED_ATTEMPT -> {
+                startAsForegroundService(cameraCapture = true)
+                AttemptCameraCapture.capture(this) { file ->
+                    if (file == null) {
+                        preferences.edit().putBoolean(CAPTURED_FOR_SESSION_KEY, false).apply()
+                    }
+                    if (!preferences.getBoolean(MONITOR_ENABLED_KEY, false)) stopSelf(startId)
+                }
+                return START_STICKY
+            }
             ACTION_BIOMETRIC_BEGIN -> {
                 biometricPendingPackage = intent.getStringExtra(EXTRA_LOCKED_PACKAGE)
                 removeLockOverlay()
@@ -101,7 +121,7 @@ class ForegroundMonitorService : Service() {
             return START_NOT_STICKY
         }
 
-        startAsForegroundService()
+        startAsForegroundService(cameraCapture = intent?.action == ACTION_ENABLE_CAMERA_CAPTURE)
         preferences.edit().putBoolean(MONITOR_ENABLED_KEY, true).apply()
         isRunning = true
 
@@ -121,7 +141,7 @@ class ForegroundMonitorService : Service() {
         super.onDestroy()
     }
 
-    private fun startAsForegroundService() {
+    private fun startAsForegroundService(cameraCapture: Boolean = false) {
         val openAppIntent = PendingIntent.getActivity(
             this,
             0,
@@ -131,7 +151,7 @@ class ForegroundMonitorService : Service() {
         val notification = NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_lock_lock)
             .setContentTitle("Still app lock is on")
-            .setContentText("Monitoring your selected apps")
+            .setContentText(if (cameraCapture) "Monitoring apps; failed-attempt camera is enabled" else "Monitoring your selected apps")
             .setContentIntent(openAppIntent)
             .setOngoing(true)
             .setCategory(Notification.CATEGORY_SERVICE)
@@ -139,10 +159,18 @@ class ForegroundMonitorService : Service() {
             .build()
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            val serviceTypes = ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE or
+                if (cameraCapture) ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA else 0
             startForeground(
                 NOTIFICATION_ID,
                 notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+                serviceTypes
+            )
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && cameraCapture) {
+            startForeground(
+                NOTIFICATION_ID,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
             )
         } else {
             startForeground(NOTIFICATION_ID, notification)
@@ -299,11 +327,13 @@ class ForegroundMonitorService : Service() {
             when {
                 enteredPin.length != 4 -> errorText.text = "Enter all 4 digits to continue."
                 pinMatches(preferences, enteredPin) -> {
+                    FailedAttemptPhotos.resetSession(this@ForegroundMonitorService)
                     unlockedPackageName = overlayPackageName
                     removeLockOverlay()
                 }
                 else -> {
                     errorText.text = "That PIN doesn’t match. Try again."
+                    FailedAttemptPhotos.registerWrongPin(this)
                     pinInput.text.clear()
                 }
             }
@@ -329,6 +359,7 @@ class ForegroundMonitorService : Service() {
                     when {
                         pattern.split(',').distinct().size < 4 -> patternErrorText?.text = "Use at least 4 dots."
                         secretMatches(preferences, PATTERN_HASH_KEY, PATTERN_SALT_KEY, pattern) -> {
+                            FailedAttemptPhotos.resetSession(this@ForegroundMonitorService)
                             unlockedPackageName = packageName
                             removeLockOverlay()
                         }
