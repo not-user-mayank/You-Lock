@@ -21,12 +21,11 @@ import android.os.Process
 import android.os.PowerManager
 import android.provider.Settings
 import android.util.Base64
-import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.fragment.app.FragmentActivity
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricPrompt
+import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.foundation.background
@@ -142,6 +141,9 @@ private enum class ChangePinStep {
 }
 
 class MainActivity : FragmentActivity() {
+    private val permissionCallbacks = mutableMapOf<Int, (Boolean) -> Unit>()
+    private var nextPermissionRequestCode = 0x1000
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
@@ -154,6 +156,28 @@ class MainActivity : FragmentActivity() {
                 }
             }
         }
+    }
+
+    fun requestRuntimePermission(permission: String, onResult: (Boolean) -> Unit) {
+        if (ContextCompat.checkSelfPermission(this, permission) == PackageManager.PERMISSION_GRANTED) {
+            onResult(true)
+            return
+        }
+
+        val requestCode = nextPermissionRequestCode++
+        permissionCallbacks[requestCode] = onResult
+        ActivityCompat.requestPermissions(this, arrayOf(permission), requestCode)
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        permissionCallbacks.remove(requestCode)?.invoke(
+            grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED
+        )
     }
 }
 
@@ -635,11 +659,6 @@ private fun InstalledAppsScreen(
         }
     }
 
-    val notificationPermissionLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.RequestPermission(),
-        onResult = { startForegroundMonitor(context) }
-    )
-
     LaunchedEffect(monitorRunning, preferences) {
         val cameraEnabled = preferences.getBoolean(CAMERA_CAPTURE_ENABLED_KEY, false)
         val cameraAllowed = ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
@@ -758,7 +777,9 @@ private fun InstalledAppsScreen(
                         context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
                         PackageManager.PERMISSION_GRANTED
                     ) {
-                        notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                        requestRuntimePermission(context, Manifest.permission.POST_NOTIFICATIONS) {
+                            startForegroundMonitor(context)
+                        }
                     } else {
                         startForegroundMonitor(context)
                     }
@@ -852,13 +873,6 @@ private fun SecurityOptionsCard(
     var uninstallProtection by remember(preferences) {
         mutableStateOf(devicePolicyManager.isAdminActive(adminComponent))
     }
-    val adminRequest = rememberLauncherForActivityResult(
-        ActivityResultContracts.StartActivityForResult()
-    ) {
-        val active = devicePolicyManager.isAdminActive(adminComponent)
-        preferences.edit().putBoolean(UNINSTALL_PROTECTION_KEY, active).apply()
-        uninstallProtection = active
-    }
     var selfLock by remember(preferences) {
         mutableStateOf(preferences.getBoolean(SELF_LOCK_KEY, true))
     }
@@ -878,17 +892,13 @@ private fun SecurityOptionsCard(
     }
     var showDeviceOwnerSetup by remember { mutableStateOf(false) }
     var showUninstallPolicyError by remember { mutableStateOf(false) }
-    val cameraPermissionLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { granted ->
-        cameraEnabled = granted
-        preferences.edit().putBoolean(CAMERA_CAPTURE_ENABLED_KEY, granted).apply()
-        if (granted) FailedAttemptPhotos.resetSession(context)
-        if (granted) setCameraForegroundMode(context, enabled = true)
-    }
     LaunchedEffect(devicePolicyManager, adminComponent) {
         while (true) {
-            uninstallProtection = devicePolicyManager.isAdminActive(adminComponent)
+            val active = devicePolicyManager.isAdminActive(adminComponent)
+            if (uninstallProtection != active) {
+                uninstallProtection = active
+                preferences.edit().putBoolean(UNINSTALL_PROTECTION_KEY, active).apply()
+            }
             delay(1_000)
         }
     }
@@ -931,7 +941,14 @@ private fun SecurityOptionsCard(
                     FailedAttemptPhotos.resetSession(context)
                     setCameraForegroundMode(context, enabled = true)
                 } else {
-                    cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+                    requestRuntimePermission(context, Manifest.permission.CAMERA) { granted ->
+                        cameraEnabled = granted
+                        preferences.edit().putBoolean(CAMERA_CAPTURE_ENABLED_KEY, granted).apply()
+                        if (granted) {
+                            FailedAttemptPhotos.resetSession(context)
+                            setCameraForegroundMode(context, enabled = true)
+                        }
+                    }
                 }
             }
             Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -964,7 +981,7 @@ private fun SecurityOptionsCard(
             }
             SettingsSwitchRow("Protect You Lock from uninstall", uninstallProtection) {
                 if (it) {
-                    adminRequest.launch(Intent(DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN).apply {
+                    context.startActivity(Intent(DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN).apply {
                         putExtra(DevicePolicyManager.EXTRA_DEVICE_ADMIN, adminComponent)
                         putExtra(DevicePolicyManager.EXTRA_ADD_EXPLANATION,
                             "Still must be deactivated in Android settings before it can be uninstalled.")
@@ -994,13 +1011,13 @@ private fun SecurityOptionsCard(
                 Text("App password", modifier = Modifier.weight(1f), color = Ink, fontSize = 13.sp)
                 TextButton(onClick = { showChangePin = true }) { Text("Change PIN", color = Green) }
             }
+            Text(
+                "Android requires you to deactivate this device administrator before uninstalling Still. It cannot block factory reset or a user who disables protection.",
+                color = Muted,
+                fontSize = 10.sp,
+                modifier = Modifier.padding(bottom = 6.dp)
+            )
         }
-        Text(
-            "Android requires you to deactivate this device administrator before uninstalling Still. It cannot block factory reset or a user who disables protection.",
-            color = Muted,
-            fontSize = 10.sp,
-            modifier = Modifier.padding(bottom = 6.dp)
-        )
     }
     if (showPhotos) {
         CapturedPhotosDialog(
@@ -1153,20 +1170,6 @@ private fun DeviceOwnerSetupDialog(onDismiss: () -> Unit) {
 private fun CapturedPhotosDialog(context: Context, onDismiss: () -> Unit) {
     var photos by remember { mutableStateOf(FailedAttemptPhotos.list(context)) }
     var message by remember { mutableStateOf("") }
-    var pendingSave by remember { mutableStateOf<java.io.File?>(null) }
-    val legacyStoragePermission = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { granted ->
-        val file = pendingSave
-        if (granted && file != null && FailedAttemptPhotos.saveToGallery(context, file) != null) {
-            message = "Saved to Pictures/You Lock."
-        } else if (!granted) {
-            message = "Storage permission is needed to save this photo."
-        } else {
-            message = "Could not save this photo."
-        }
-        pendingSave = null
-    }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Private failed-attempt photos") },
@@ -1195,8 +1198,13 @@ private fun CapturedPhotosDialog(context: Context, onDismiss: () -> Unit) {
                                         ContextCompat.checkSelfPermission(context, Manifest.permission.WRITE_EXTERNAL_STORAGE) !=
                                         PackageManager.PERMISSION_GRANTED
                                     ) {
-                                        pendingSave = file
-                                        legacyStoragePermission.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                                        requestRuntimePermission(context, Manifest.permission.WRITE_EXTERNAL_STORAGE) { granted ->
+                                            message = when {
+                                                !granted -> "Storage permission is needed to save this photo."
+                                                FailedAttemptPhotos.saveToGallery(context, file) != null -> "Saved to Pictures/You Lock."
+                                                else -> "Could not save this photo."
+                                            }
+                                        }
                                     } else if (FailedAttemptPhotos.saveToGallery(context, file) != null) {
                                         message = "Saved to Pictures/You Lock."
                                     } else message = "Could not save this photo."
@@ -1768,6 +1776,19 @@ private fun startForegroundMonitor(context: Context) {
     val serviceIntent = Intent(context, ForegroundMonitorService::class.java)
     if (cameraEnabled) serviceIntent.action = ACTION_ENABLE_CAMERA_CAPTURE
     context.startForegroundService(serviceIntent)
+}
+
+private fun requestRuntimePermission(
+    context: Context,
+    permission: String,
+    onResult: (Boolean) -> Unit
+) {
+    val activity = context as? MainActivity
+    if (activity == null) {
+        onResult(false)
+    } else {
+        activity.requestRuntimePermission(permission, onResult)
+    }
 }
 
 private fun setCameraForegroundMode(context: Context, enabled: Boolean) {
