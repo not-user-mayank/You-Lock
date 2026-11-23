@@ -639,10 +639,7 @@ private fun InstalledAppsScreen(
             PackageManager.PERMISSION_GRANTED
         if (monitorRunning && cameraEnabled && cameraAllowed && !cameraServicePromoted) {
             cameraServicePromoted = true
-            ContextCompat.startForegroundService(
-                context,
-                Intent(context, ForegroundMonitorService::class.java).setAction(ACTION_ENABLE_CAMERA_CAPTURE)
-            )
+            setCameraForegroundMode(context, enabled = true)
         }
     }
 
@@ -670,7 +667,7 @@ private fun InstalledAppsScreen(
         Text("UNLOCK METHOD", color = Green, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.2.sp)
         Spacer(Modifier.height(8.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            UnlockMode.values().forEach { mode ->
+            UnlockMode.entries.forEach { mode ->
                 val modeEnabled = mode != UnlockMode.FINGERPRINT || fingerprintAvailable
                 Button(
                     onClick = {
@@ -871,12 +868,7 @@ private fun SecurityOptionsCard(
         cameraEnabled = granted
         preferences.edit().putBoolean(CAMERA_CAPTURE_ENABLED_KEY, granted).apply()
         if (granted) FailedAttemptPhotos.resetSession(context)
-        if (granted && ForegroundMonitorService.isRunning) {
-            ContextCompat.startForegroundService(
-                context,
-                Intent(context, ForegroundMonitorService::class.java).setAction(ACTION_ENABLE_CAMERA_CAPTURE)
-            )
-        }
+        if (granted) setCameraForegroundMode(context, enabled = true)
     }
     LaunchedEffect(devicePolicyManager, adminComponent) {
         while (true) {
@@ -901,26 +893,14 @@ private fun SecurityOptionsCard(
                     cameraEnabled = false
                     preferences.edit().putBoolean(CAMERA_CAPTURE_ENABLED_KEY, false).apply()
                     FailedAttemptPhotos.resetSession(context)
-                    if (ForegroundMonitorService.isRunning) {
-                        ContextCompat.startForegroundService(
-                            context,
-                            Intent(context, ForegroundMonitorService::class.java)
-                                .setAction(ACTION_DISABLE_CAMERA_CAPTURE)
-                        )
-                    }
+                    setCameraForegroundMode(context, enabled = false)
                 } else if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
                     PackageManager.PERMISSION_GRANTED
                 ) {
                     cameraEnabled = true
                     preferences.edit().putBoolean(CAMERA_CAPTURE_ENABLED_KEY, true).apply()
                     FailedAttemptPhotos.resetSession(context)
-                    if (ForegroundMonitorService.isRunning) {
-                        ContextCompat.startForegroundService(
-                            context,
-                            Intent(context, ForegroundMonitorService::class.java)
-                                .setAction(ACTION_ENABLE_CAMERA_CAPTURE)
-                        )
-                    }
+                    setCameraForegroundMode(context, enabled = true)
                 } else {
                     cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
                 }
@@ -1448,20 +1428,23 @@ private fun loadLaunchableApps(context: Context): List<InstalledApp> {
         packageManager.queryIntentActivities(intent, 0)
     }
 
-    return activities
+    return activities.asSequence()
         .mapNotNull { resolveInfo ->
-            val activityInfo = resolveInfo.activityInfo ?: return@mapNotNull null
-            val packageName = activityInfo.applicationInfo.packageName
+            val packageName = resolveInfo.activityInfo?.applicationInfo?.packageName
+                ?: return@mapNotNull null
             if (packageName == context.packageName) return@mapNotNull null
-
+            packageName to resolveInfo
+        }
+        .distinctBy { (packageName, _) -> packageName }
+        .map { (packageName, resolveInfo) ->
             InstalledApp(
                 name = resolveInfo.loadLabel(packageManager).toString(),
                 packageName = packageName,
                 icon = runCatching { resolveInfo.loadIcon(packageManager).toImageBitmap() }.getOrNull()
             )
         }
-        .distinctBy { it.packageName }
         .sortedBy { it.name.lowercase() }
+        .toList()
 }
 
 @Suppress("DEPRECATION")
@@ -1600,4 +1583,13 @@ private fun startForegroundMonitor(context: Context) {
     val serviceIntent = Intent(context, ForegroundMonitorService::class.java)
     if (cameraEnabled) serviceIntent.action = ACTION_ENABLE_CAMERA_CAPTURE
     context.startForegroundService(serviceIntent)
+}
+
+private fun setCameraForegroundMode(context: Context, enabled: Boolean) {
+    if (!ForegroundMonitorService.isRunning) return
+    val action = if (enabled) ACTION_ENABLE_CAMERA_CAPTURE else ACTION_DISABLE_CAMERA_CAPTURE
+    ContextCompat.startForegroundService(
+        context,
+        Intent(context, ForegroundMonitorService::class.java).setAction(action)
+    )
 }

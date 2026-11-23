@@ -77,9 +77,7 @@ class ForegroundMonitorService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
-            ACTION_ENABLE_CAMERA_CAPTURE -> {
-                startAsForegroundService(cameraCapture = true)
-            }
+            ACTION_ENABLE_CAMERA_CAPTURE -> Unit
             ACTION_DISABLE_CAMERA_CAPTURE -> {
                 startAsForegroundService(cameraCapture = false)
                 return START_STICKY
