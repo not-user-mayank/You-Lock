@@ -10,6 +10,7 @@ You Lock is an Android app that protects selected apps with a PIN, a drawn patte
 - Optionally require the PIN again whenever You Lock is reopened.
 - Set a recovery question and answer to reset a forgotten PIN.
 - Optionally activate Android's device administrator so Android requires deactivation before uninstalling You Lock.
+- On managed, device-owner phones, block uninstalling all apps on the device.
 - Optionally restart monitoring after device reboot.
 - Optionally capture a front-camera photo after 2, 4, or 6 incorrect unlock attempts.
 - Review captured photos privately and save selected photos to the device gallery.
@@ -30,6 +31,8 @@ Open the project folder in Android Studio, allow Gradle to sync, and run the `ap
 To protect apps, grant Usage Access and Display over other apps, then start **Background app lock**. Android shows an ongoing notification while the monitor is running. Turn on **Restart monitoring after reboot** to ask Android to restart the service on the next boot. You must first start monitoring and grant the required permissions. Some phone makers may still stop background work through battery controls, and force-stopping You Lock disables automatic restarts until it is opened again.
 
 The optional uninstall protection uses Android's device administrator flow. When enabled, Android requires the user to deactivate You Lock in system settings before uninstalling it. The user can still deactivate it, and it does not prevent factory reset or guarantee protection from device-management tools.
+
+Blocking uninstall of apps requires You Lock to be the device owner. Install You Lock on the phone, connect it to a computer with USB debugging enabled, then run `adb shell dpm set-device-owner com.example.applock/.UninstallAdminReceiver` from the computer. Android may reject this on an already provisioned phone. A newly set-up phone or factory reset may be required. After setup, enable **Block uninstall of all apps**. Android then blocks uninstalling apps across the device, including apps outside You Lock's lock list. Turning off this setting clears the restriction.
 
 The recovery answer is stored locally as a salted hash. Keep the answer memorable: it cannot be retrieved from the app, and uninstalling or clearing app data removes the saved recovery information.
 

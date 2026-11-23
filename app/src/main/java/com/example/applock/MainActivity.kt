@@ -104,6 +104,7 @@ internal const val PATTERN_SALT_KEY = "pattern_salt"
 internal const val SELF_LOCK_KEY = "self_lock_enabled"
 internal const val ALWAYS_MONITOR_KEY = "always_monitor"
 internal const val UNINSTALL_PROTECTION_KEY = "uninstall_protection"
+internal const val BLOCK_ALL_APP_UNINSTALL_KEY = "block_all_app_uninstall"
 internal const val FAILED_ATTEMPT_THRESHOLD_KEY = "failed_attempt_threshold"
 internal const val CAMERA_CAPTURE_ENABLED_KEY = "camera_capture_enabled"
 internal const val FAILED_ATTEMPTS_KEY = "failed_attempts"
@@ -839,6 +840,9 @@ private fun SecurityOptionsCard(
     val adminComponent = remember(context) {
         android.content.ComponentName(context, UninstallAdminReceiver::class.java)
     }
+    val isDeviceOwner = remember(devicePolicyManager, context) {
+        devicePolicyManager.isDeviceOwnerApp(context.packageName)
+    }
     var uninstallProtection by remember(preferences) {
         mutableStateOf(devicePolicyManager.isAdminActive(adminComponent))
     }
@@ -862,6 +866,11 @@ private fun SecurityOptionsCard(
         mutableStateOf(preferences.getInt(FAILED_ATTEMPT_THRESHOLD_KEY, 2))
     }
     var showPhotos by remember { mutableStateOf(false) }
+    var protectLockedAppUninstall by remember(preferences) {
+        mutableStateOf(preferences.getBoolean(BLOCK_ALL_APP_UNINSTALL_KEY, false))
+    }
+    var showDeviceOwnerSetup by remember { mutableStateOf(false) }
+    var showUninstallPolicyError by remember { mutableStateOf(false) }
     val cameraPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted ->
@@ -874,6 +883,19 @@ private fun SecurityOptionsCard(
         while (true) {
             uninstallProtection = devicePolicyManager.isAdminActive(adminComponent)
             delay(1_000)
+        }
+    }
+    LaunchedEffect(isDeviceOwner, protectLockedAppUninstall) {
+        if (isDeviceOwner) {
+            if (!setUninstallRestriction(context, protectLockedAppUninstall)) {
+                showUninstallPolicyError = true
+                if (protectLockedAppUninstall) {
+                    protectLockedAppUninstall = false
+                    preferences.edit()
+                        .putBoolean(BLOCK_ALL_APP_UNINSTALL_KEY, false)
+                        .apply()
+                }
+            }
         }
     }
 
@@ -933,7 +955,7 @@ private fun SecurityOptionsCard(
                 Text("Private photos ($photoCount)", modifier = Modifier.weight(1f), color = Ink, fontSize = 13.sp)
                 TextButton(onClick = { showPhotos = true }) { Text("View", color = Green) }
             }
-            SettingsSwitchRow("Uninstall protection", uninstallProtection) {
+            SettingsSwitchRow("Protect You Lock from uninstall", uninstallProtection) {
                 if (it) {
                     adminRequest.launch(Intent(DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN).apply {
                         putExtra(DevicePolicyManager.EXTRA_DEVICE_ADMIN, adminComponent)
@@ -942,6 +964,19 @@ private fun SecurityOptionsCard(
                     })
                 } else {
                     context.startActivity(Intent("android.settings.DEVICE_ADMIN_SETTINGS"))
+                }
+            }
+            SettingsSwitchRow(
+                "Block uninstall of all apps",
+                isDeviceOwner && protectLockedAppUninstall
+            ) { enabled ->
+                if (!isDeviceOwner) {
+                    showDeviceOwnerSetup = true
+                } else {
+                    protectLockedAppUninstall = enabled
+                    preferences.edit()
+                        .putBoolean(BLOCK_ALL_APP_UNINSTALL_KEY, enabled)
+                        .apply()
                 }
             }
             Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -962,6 +997,53 @@ private fun SecurityOptionsCard(
             onDismiss = { showPhotos = false }
         )
     }
+    if (showDeviceOwnerSetup) {
+        DeviceOwnerSetupDialog(onDismiss = { showDeviceOwnerSetup = false })
+    }
+    if (showUninstallPolicyError) {
+        AlertDialog(
+            onDismissRequest = { showUninstallPolicyError = false },
+            title = { Text("Could not update uninstall protection") },
+            text = { Text("Android did not accept the device-owner policy. Confirm You Lock is still the device owner and try again.", color = Muted) },
+            confirmButton = {
+                TextButton(onClick = { showUninstallPolicyError = false }) { Text("OK", color = Green) }
+            }
+        )
+    }
+}
+
+@Composable
+private fun DeviceOwnerSetupDialog(onDismiss: () -> Unit) {
+    val context = LocalContext.current
+    val command = "adb shell dpm set-device-owner com.example.applock/.UninstallAdminReceiver"
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Device-owner setup required") },
+        text = {
+            Column {
+                Text(
+                    "Android only lets a device-owner app block other apps from uninstalling. Set You Lock as device owner from a computer during device provisioning, then reopen this setting.",
+                    color = Muted
+                )
+                Spacer(Modifier.height(12.dp))
+                Text(command, color = Ink, fontSize = 12.sp)
+                Text(
+                    "This blocks uninstalling every app, including apps outside You Lock's lock list. Device-owner setup usually requires a newly set-up phone and may require a factory reset.",
+                    color = Muted,
+                    fontSize = 11.sp,
+                    modifier = Modifier.padding(top = 10.dp)
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                clipboard.setPrimaryClip(android.content.ClipData.newPlainText("Device-owner command", command))
+                onDismiss()
+            }) { Text("Copy command", color = Green) }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Close") } }
+    )
 }
 
 @Composable
