@@ -9,6 +9,7 @@ You Lock is an Android app that protects selected apps with a PIN, a drawn patte
 - Keep app selections and unlock settings saved locally on the device.
 - Optionally require the PIN again whenever You Lock is reopened.
 - Set a recovery question and answer to reset a forgotten PIN.
+- Change the PIN after verifying the current PIN.
 - Optionally activate Android's device administrator so Android requires deactivation before uninstalling You Lock.
 - On managed, device-owner phones, block uninstalling all apps on the device.
 - Optionally restart monitoring after device reboot.

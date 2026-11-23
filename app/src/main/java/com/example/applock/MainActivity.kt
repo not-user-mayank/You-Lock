@@ -135,6 +135,12 @@ private data class DetectedApp(
     val packageName: String
 )
 
+private enum class ChangePinStep {
+    CURRENT,
+    NEW,
+    CONFIRM
+}
+
 class MainActivity : FragmentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -866,6 +872,7 @@ private fun SecurityOptionsCard(
         mutableStateOf(preferences.getInt(FAILED_ATTEMPT_THRESHOLD_KEY, 2))
     }
     var showPhotos by remember { mutableStateOf(false) }
+    var showChangePin by remember { mutableStateOf(false) }
     var protectLockedAppUninstall by remember(preferences) {
         mutableStateOf(preferences.getBoolean(BLOCK_ALL_APP_UNINSTALL_KEY, false))
     }
@@ -983,6 +990,10 @@ private fun SecurityOptionsCard(
                 Text("Recovery question", modifier = Modifier.weight(1f), color = Ink, fontSize = 13.sp)
                 TextButton(onClick = onRecoverySetup) { Text("Set up", color = Green) }
             }
+            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text("App password", modifier = Modifier.weight(1f), color = Ink, fontSize = 13.sp)
+                TextButton(onClick = { showChangePin = true }) { Text("Change PIN", color = Green) }
+            }
         }
         Text(
             "Android requires you to deactivate this device administrator before uninstalling Still. It cannot block factory reset or a user who disables protection.",
@@ -995,6 +1006,12 @@ private fun SecurityOptionsCard(
         CapturedPhotosDialog(
             context = context,
             onDismiss = { showPhotos = false }
+        )
+    }
+    if (showChangePin) {
+        ChangePinDialog(
+            preferences = preferences,
+            onDismiss = { showChangePin = false }
         )
     }
     if (showDeviceOwnerSetup) {
@@ -1010,6 +1027,92 @@ private fun SecurityOptionsCard(
             }
         )
     }
+}
+
+@Composable
+private fun ChangePinDialog(
+    preferences: android.content.SharedPreferences,
+    onDismiss: () -> Unit
+) {
+    var step by remember { mutableStateOf(ChangePinStep.CURRENT) }
+    var input by remember { mutableStateOf("") }
+    var currentPin by remember { mutableStateOf("") }
+    var newPin by remember { mutableStateOf("") }
+    var message by remember { mutableStateOf("") }
+
+    val title = when (step) {
+        ChangePinStep.CURRENT -> "Verify current PIN"
+        ChangePinStep.NEW -> "Choose a new PIN"
+        ChangePinStep.CONFIRM -> "Confirm new PIN"
+    }
+    val label = when (step) {
+        ChangePinStep.CURRENT -> "Current PIN"
+        ChangePinStep.NEW -> "New 4-digit PIN"
+        ChangePinStep.CONFIRM -> "Confirm new PIN"
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(title) },
+        text = {
+            Column {
+                Text("Enter your current PIN, then choose and confirm a new one.", color = Muted)
+                Spacer(Modifier.height(10.dp))
+                OutlinedTextField(
+                    value = input,
+                    onValueChange = { value ->
+                        if (value.length <= 4 && value.all(Char::isDigit)) {
+                            input = value
+                            message = ""
+                        }
+                    },
+                    label = { Text(label) },
+                    singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword)
+                )
+                if (message.isNotEmpty()) {
+                    Text(message, color = Color(0xFFB0443E), fontSize = 12.sp)
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                when (step) {
+                    ChangePinStep.CURRENT -> when {
+                        input.length != 4 -> message = "Enter all 4 digits."
+                        !pinMatches(preferences, input) -> message = "That PIN doesn’t match."
+                        else -> {
+                            currentPin = input
+                            input = ""
+                            message = ""
+                            step = ChangePinStep.NEW
+                        }
+                    }
+                    ChangePinStep.NEW -> when {
+                        input.length != 4 -> message = "Choose a 4-digit PIN."
+                        input == currentPin -> message = "Choose a PIN different from your current one."
+                        else -> {
+                            newPin = input
+                            input = ""
+                            message = ""
+                            step = ChangePinStep.CONFIRM
+                        }
+                    }
+                    ChangePinStep.CONFIRM -> if (input == newPin) {
+                        savePin(preferences, newPin)
+                        onDismiss()
+                    } else {
+                        input = ""
+                        newPin = ""
+                        message = "Those PINs didn’t match. Enter a new PIN again."
+                        step = ChangePinStep.NEW
+                    }
+                }
+            }) { Text(if (step == ChangePinStep.CONFIRM) "Save PIN" else "Continue", color = Green) }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } }
+    )
 }
 
 @Composable
